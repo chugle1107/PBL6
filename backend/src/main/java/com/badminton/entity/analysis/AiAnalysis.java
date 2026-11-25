@@ -148,6 +148,14 @@ public class AiAnalysis {
     @Column(name = "analyzed_ranges", columnDefinition = "jsonb")
     private String analyzedRanges;
 
+    /** Worker step before the first analysed second: downloading, cutting or loading (written by the worker). */
+    @Column(name = "worker_stage", length = 20)
+    private String workerStage;
+
+    /** Download percent while workerStage is downloading, else null. */
+    @Column(name = "worker_stage_percent")
+    private Short workerStagePercent;
+
     /** Latest seek of the viewer into unanalysed video; the worker scans there first. */
     @Column(name = "focus_seconds", precision = 10, scale = 2)
     private BigDecimal focusSeconds;

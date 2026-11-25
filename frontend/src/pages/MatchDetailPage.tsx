@@ -12,13 +12,26 @@ import { cancelAnalysis, dispatchAnalysis, getAnalysisStatus, retryAnalysis } fr
 import { errorMessage, isNetworkError } from '../api/errors';
 import type { Match, MatchVideo } from '../types/match';
 import type { AnalysisStatus } from '../types/replay';
-import { formatLongClock, parseClock, segmentLabel } from '../utils/clock';
+import { finishClockInput, formatClockInput, formatLongClock, parseClock, segmentLabel } from '../utils/clock';
+import { ANALYSIS_PHASES, analysisPhase, stageText } from '../utils/analysisStage';
 
 /** Same patterns the backend accepts: watch?v=, youtu.be/, /shorts/, /live/ and /embed/ links. */
 const YOUTUBE_ID = /^(?:https?:\/\/)?(?:(?:www\.|m\.|music\.)?youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})(?:[?&#/].*)?$/;
 const parseYoutubeId = (url: string) => url.trim().match(YOUTUBE_ID)?.[1] ?? null;
 // Same floor as the backend (VideoService.MIN_SEGMENT_SECONDS): a few rallies
 const MIN_SEGMENT_SECONDS = 30;
+
+/** "Đã chạy 1:23", ticking every second, so the set-up steps visibly move between status polls. */
+const ElapsedSince: React.FC<{ startedAt?: string | null }> = ({ startedAt }) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const started = startedAt ? new Date(startedAt).getTime() : NaN;
+  if (!Number.isFinite(started)) return null;
+  return <li className="ml-auto text-ink/55 tabular-nums">Đã chạy {formatLongClock((now - started) / 1000)}</li>;
+};
 
 /** Name plates laid over the video frame: upper (far) player at the top, lower (near) at the bottom. */
 const SidePlates: React.FC<{ upper: string; lower: string }> = ({ upper, lower }) => (
@@ -251,7 +264,7 @@ export const MatchDetailPage: React.FC = () => {
     const startSeconds = parseClock(segmentStart);
     const endSeconds = parseClock(segmentEnd);
     if (Number.isNaN(startSeconds) || Number.isNaN(endSeconds)) {
-      setYoutubeError('Thời điểm chưa đúng. Hãy nhập dạng 30:00, 1:05:30, hoặc số phút như 30.');
+      setYoutubeError('Thời điểm chưa đúng. Phút và giây phải dưới 60, ví dụ 9:10 hoặc 1:05:30.');
       return;
     }
     if (endSeconds != null && endSeconds - (startSeconds ?? 0) < MIN_SEGMENT_SECONDS) {
@@ -517,9 +530,10 @@ export const MatchDetailPage: React.FC = () => {
                               autoComplete="off"
                               value={field.value}
                               onChange={e => {
-                                field.set(e.target.value);
+                                field.set(formatClockInput(e.target.value));
                                 setYoutubeError(null);
                               }}
+                              onBlur={e => field.set(finishClockInput(e.target.value))}
                               placeholder={field.placeholder}
                               className="w-full h-10 px-3 rounded-md bg-sheet border border-ink/15 text-sm text-ink tabular-nums placeholder:text-ink/55 focus:outline-none focus:border-pitch focus:ring-2 focus:ring-pitch/20"
                             />
@@ -527,7 +541,8 @@ export const MatchDetailPage: React.FC = () => {
                         ))}
                       </div>
                       <p className="text-xs text-ink/65">
-                        Nhập dạng 30:00 hoặc 1:05:30, hoặc số phút như 30. Chỉ phân tích một đoạn thì AI chạy nhanh hơn,
+                        Chỉ cần gõ số, dấu hai chấm tự thêm: 910 thành 9:10, 10530 thành 1:05:30. Gõ 30 là phút 30.
+                        Chỉ phân tích một đoạn thì AI chạy nhanh hơn,
                         còn trang xem lại vẫn phát cả video YouTube.
                       </p>
                     </fieldset>
@@ -676,14 +691,36 @@ export const MatchDetailPage: React.FC = () => {
                 <h2 className="text-lg font-semibold text-ink">AI đang phân tích</h2>
                 <p className="text-sm text-ink/70 mt-1">Bạn có thể xem trận ngay, các pha cầu hiện dần khi AI phân tích tới.</p>
               </div>
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-ink/70">{analysisStatus?.currentStage || 'Đang khởi động'}</span>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-ink/70 truncate">{stageText(analysisStatus ?? undefined)}</span>
                   <span className="text-ink font-semibold tabular-nums">{progress}%</span>
                 </div>
-                <div className="w-full h-2 rounded-full bg-ink/10 overflow-hidden">
-                  <div className="h-full bg-pitch transition-all duration-500 rounded-full" style={{ width: `${progress}%` }} />
+                <div
+                  className="relative w-full h-2 rounded-full bg-ink/10 overflow-hidden"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progress}
+                >
+                  <div className="h-full bg-pitch transition-[width] duration-700 rounded-full" style={{ width: `${Math.max(3, progress)}%` }} />
+                  <div className="absolute inset-0 bg-[linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent)] animate-[shimmer_1.8s_infinite] bg-[length:40%_100%] bg-no-repeat" />
                 </div>
+                <ol className="flex flex-wrap gap-x-3 gap-y-1 text-xs" aria-label="Các bước phân tích">
+                  {ANALYSIS_PHASES.slice(0, 4).map((label, i) => {
+                    const phase = analysisPhase(analysisStatus ?? undefined);
+                    return (
+                      <li key={label} className="flex items-center gap-1.5">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${i < phase ? 'bg-pitch' : i === phase ? 'bg-pb animate-pulse' : 'bg-ink/15'}`}
+                          aria-hidden
+                        />
+                        <span className={i === phase ? 'text-ink font-medium' : i < phase ? 'text-ink/65' : 'text-ink/45'}>{label}</span>
+                      </li>
+                    );
+                  })}
+                  <ElapsedSince startedAt={analysisStatus?.startedAt} />
+                </ol>
               </div>
               <Link
                 to={`/matches/${id}/replay`}

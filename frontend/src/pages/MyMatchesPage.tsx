@@ -29,6 +29,7 @@ import { Notice } from '../components/ui/Notice';
 import { toast } from '../components/ui/toastBus';
 import type { Match } from '../types/match';
 import type { AnalysisStatus } from '../types/replay';
+import { ANALYSIS_PHASES, analysisPhase, stageText } from '../utils/analysisStage';
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -105,29 +106,13 @@ const relativeTime = (value?: string | null) => {
   return formatDate(value);
 };
 
-/** "streaming: Đang phân tích..." -> "Đang phân tích...". */
-const stageText = (status?: AnalysisStatus) => {
-  if (!status) return 'Đang kết nối máy phân tích…';
-  const raw = status.currentStage || '';
-  const text = raw.replace(/^[a-z_]+:\s*/i, '').trim();
-  if (!text || /^[a-z_]+$/i.test(text)) return status.status === 'QUEUED' ? 'Đang chờ trong hàng đợi' : 'Đang phân tích';
-  return text;
-};
-
-/** Where the run is: queued, warming up, analysing, done. Works for the mock engine and the GPU worker alike. */
-const phaseOf = (status?: AnalysisStatus) => {
-  if (!status || status.status === 'QUEUED' || status.status === 'NONE') return 0;
-  if (status.status === 'COMPLETED') return 3;
-  return (status.progressPercent ?? 0) > 0 ? 2 : 1;
-};
-const PHASES = ['Hàng đợi', 'Khởi động', 'Phân tích', 'Hoàn tất'];
-
 const etaOf = (status?: AnalysisStatus) => {
   if (!status?.startedAt) return null;
   const elapsed = (Date.now() - new Date(status.startedAt).getTime()) / 1000;
   const p = status.progressPercent ?? 0;
   if (!Number.isFinite(elapsed) || elapsed <= 0) return null;
-  return { elapsed, remaining: p >= 5 && p < 100 ? (elapsed * (100 - p)) / p : null };
+  // Only once the video is being analysed: the set-up share of the bar moves at another pace.
+  return { elapsed, remaining: analysisPhase(status) === 3 && p >= 15 && p < 100 ? (elapsed * (100 - p)) / p : null };
 };
 
 /** What the match is waiting for, and the one thing to do next. */
@@ -225,7 +210,7 @@ const Scoreboard: React.FC<{ match: Match }> = ({ match }) => {
 
 const LiveAnalysisCard: React.FC<{ match: Match; status?: AnalysisStatus }> = ({ match, status }) => {
   const percent = status?.progressPercent ?? 0;
-  const phase = phaseOf(status);
+  const phase = analysisPhase(status);
   const eta = etaOf(status);
   const covered = status?.analyzedUntilSeconds;
   const total = status?.videoDurationSeconds ?? match.durationSeconds;
@@ -259,10 +244,10 @@ const LiveAnalysisCard: React.FC<{ match: Match; status?: AnalysisStatus }> = ({
           </div>
         </div>
 
-        <ProgressBar percent={percent} live={phase < 3} />
+        <ProgressBar percent={percent} live={phase < 4} />
 
-        <ol className="grid grid-cols-4 gap-1 text-[11px] sm:text-xs" aria-label="Các bước phân tích">
-          {PHASES.map((label, i) => (
+        <ol className="grid grid-cols-5 gap-1 text-[11px] sm:text-xs" aria-label="Các bước phân tích">
+          {ANALYSIS_PHASES.map((label, i) => (
             <li key={label} className="flex items-center gap-1.5 min-w-0">
               <span
                 className={`w-2 h-2 rounded-full shrink-0 ${
