@@ -3,7 +3,12 @@
  * Returns seconds, null for an empty field and NaN when the text is not a time.
  */
 export const parseClock = (text: string): number | null => {
-  const value = text.trim();
+  // A Vietnamese IME can leave a tone mark on a digit ("9̣:10") and some keyboards type
+  // full-width digits or colons; NFKC folds those, then marks and invisible characters go.
+  const value = text
+    .normalize('NFKC')
+    .replace(/[\p{M}​-‍⁠﻿]/gu, '')
+    .replace(/\s+/g, '');
   if (!value) return null;
   if (/^\d+([.,]\d+)?$/.test(value)) return Math.round(parseFloat(value.replace(',', '.')) * 60);
   const parts = value.split(':');
