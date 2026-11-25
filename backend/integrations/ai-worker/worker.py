@@ -32,6 +32,7 @@ from psycopg2.extras import Json, execute_values
 
 from app.config import settings
 from app.infrastructure.database import (
+    StageReporter,
     fetch_analysis_status,
     fetch_court_player_names,
     get_connection,
@@ -801,18 +802,21 @@ def process_job(payload: Dict[str, Any]):
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         youtube_url = payload.get("youtubeUrl")
         segment: Segment | None = None
+        # Download, cut and model loading show on the progress bar before the first analysed second.
+        on_stage = StageReporter(analysis_id)
         if youtube_url:
             temp_video_path = Path(tmpdir) / f"match_{match_id}_youtube.mp4"
             span = download_youtube_video(
                 youtube_url, temp_video_path,
                 payload.get("segmentStartSeconds"), payload.get("segmentEndSeconds"),
+                on_stage=on_stage,
             )
             if span is not None:
                 segment = Segment(*span, fps=_video_fps(temp_video_path))
                 logger.info(f"Analysing {segment.start:.0f}s-{segment.end:.0f}s of the YouTube video")
         else:
             temp_video_path = Path(tmpdir) / Path(storage_path).name
-            download_video(storage_path, temp_video_path)
+            download_video(storage_path, temp_video_path, on_stage=on_stage)
 
         # Fall back to skeleton mode when AI_Classifier is not available (e.g. a CPU-only container).
         try:
@@ -838,6 +842,7 @@ def process_job(payload: Dict[str, Any]):
         output_json_path = Path(tmpdir) / f"match_{match_id}_analysis.json"
         player_upper, player_lower = fetch_court_player_names(match_id)
         logger.info(f"Launching AI pipeline inference on GPU...")
+        on_stage("loading", None)
         # Provisional rallies appear on the replay page while the rest of the video is analysed.
         progress = ProgressWriter(analysis_id, match_id)
         on_progress: Callable[[Dict[str, Any]], None] = progress.submit

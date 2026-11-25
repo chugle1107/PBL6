@@ -46,10 +46,32 @@ public class AnalysisProgress {
             double covered = analyzedRanges != null
                     ? analyzedRanges.stream().mapToDouble(r -> Math.max(0, r.get(1) - r.get(0))).sum()
                     : analysis.getAnalyzedUntilSeconds().doubleValue();
-            return new Progress((int) Math.min(99, Math.floor(covered * 100 / duration)),
+            double share = Math.min(1, covered / duration);
+            return new Progress((int) Math.min(99, SETUP_PERCENT + Math.floor(share * (99 - SETUP_PERCENT))),
                     "streaming: Đang phân tích, kết quả hiện dần trên Replay");
         }
-        // Video download and model warm-up: start from 0 so the bar never jumps back.
-        return new Progress(0, "Đang khởi động GPU Worker (tải video, nạp model)");
+        return setup(analysis.getWorkerStage(), analysis.getWorkerStagePercent());
+    }
+
+    /**
+     * The first SETUP_PERCENT of the bar is the worker's set-up, so it moves while the video downloads and the
+     * models load instead of sitting at 0%. Downloading takes most of that time (a long YouTube match is ~1 GB).
+     */
+    static final int SETUP_PERCENT = 10;
+    private static final int DOWNLOAD_PERCENT = 8;
+
+    static Progress setup(String stage, Short downloadPercent) {
+        if (stage == null) {
+            return new Progress(0, "starting: Máy phân tích đã nhận việc, đang chuẩn bị");
+        }
+        return switch (stage) {
+            case "downloading" -> {
+                int p = downloadPercent == null ? 0 : Math.max(0, Math.min(100, downloadPercent));
+                yield new Progress(p * DOWNLOAD_PERCENT / 100,
+                        downloadPercent == null ? "downloading: Đang tải video" : "downloading: Đang tải video (" + p + "%)");
+            }
+            case "cutting" -> new Progress(DOWNLOAD_PERCENT + 1, "cutting: Đang cắt đoạn cần phân tích");
+            default -> new Progress(SETUP_PERCENT, "loading: Đang nạp model AI và nhận diện sân");
+        };
     }
 }

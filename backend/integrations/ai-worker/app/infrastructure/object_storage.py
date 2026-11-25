@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 import boto3
 from botocore.client import Config
@@ -26,19 +27,39 @@ def get_client():
     )
 
 
-def download_video(storage_path: str, local_path: Path) -> None:
+# on_stage(stage, percent) reports the set-up step for the progress bar (see database.StageReporter).
+OnStage = Callable[[str, "float | None"], None]
+
+
+def download_video(storage_path: str, local_path: Path, on_stage: OnStage | None = None) -> None:
     logger.info(
         "Downloading video '%s' from bucket '%s'",
         storage_path,
         settings.s3_bucket,
     )
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    get_client().download_file(settings.s3_bucket, storage_path, str(local_path))
+    client = get_client()
+    callback = None
+    if on_stage is not None:
+        on_stage("downloading", None)
+        try:
+            total = client.head_object(Bucket=settings.s3_bucket, Key=storage_path)["ContentLength"]
+        except Exception:  # noqa: BLE001 - the size only drives the progress bar
+            total = 0
+        if total:
+            done = [0]
+
+            def callback(chunk: int) -> None:
+                done[0] += chunk
+                on_stage("downloading", done[0] * 100 / total)
+
+    client.download_file(settings.s3_bucket, storage_path, str(local_path), Callback=callback)
     logger.info("Downloaded %.2f MB", local_path.stat().st_size / (1024 * 1024))
 
 
-# Same cap as an uploaded file.
-MAX_YOUTUBE_BYTES = 500 * 1024 * 1024
+# Larger than the 500 MB upload cap: the file only lives in the worker's temp folder for the run and is never
+# stored, so a full match at 720p fits (a 56-minute BWF match is about 240 MB, a high-bitrate one up to ~1 GB).
+MAX_YOUTUBE_BYTES = 1536 * 1024 * 1024
 # When only part of a video is analysed the whole video is still downloaded (see download_youtube_video), but only
 # into a temporary file, so a longer match is allowed.
 MAX_YOUTUBE_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
@@ -83,13 +104,13 @@ def choose_youtube_format(info: dict, max_bytes: int = MAX_YOUTUBE_BYTES) -> dic
             if size is not None and size <= max_bytes:
                 return fmt
     minutes = round((duration or 0) / 60)
+    limit = f"{max_bytes / 1024 ** 3:g} GB"
     if max_bytes > MAX_YOUTUBE_BYTES:
         raise RuntimeError(
-            f"Video YouTube này dài {minutes} phút, vượt giới hạn {max_bytes // (1024 ** 3)} GB "
-            "ở độ phân giải AI cần (480p trở lên)."
+            f"Video YouTube này dài {minutes} phút, vượt giới hạn {limit} ở độ phân giải AI cần (480p trở lên)."
         )
     raise RuntimeError(
-        f"Video YouTube này dài {minutes} phút, vượt giới hạn 500 MB ở độ phân giải AI cần (480p trở lên). "
+        f"Video YouTube này dài {minutes} phút, vượt giới hạn {limit} ở độ phân giải AI cần (480p trở lên). "
         "Hãy chọn một đoạn để phân tích, ví dụ một ván đấu."
     )
 
@@ -157,6 +178,7 @@ def download_youtube_video(
     local_path: Path,
     start_seconds: float | None = None,
     end_seconds: float | None = None,
+    on_stage: OnStage | None = None,
 ) -> tuple[float, float] | None:
     """
     Downloads a YouTube video to local_path with yt-dlp, at most MAX_YOUTUBE_BYTES.
@@ -184,6 +206,8 @@ def download_youtube_video(
         "max_filesize": MAX_YOUTUBE_BYTES,
     }
     source_path = local_path
+    if on_stage is not None:
+        on_stage("downloading", None)
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -201,7 +225,17 @@ def download_youtube_video(
         )
         # The format is fixed when YoutubeDL is created, so a second instance downloads it. It extracts the page
         # again (about a second): the stream URLs of the first one are tied to that session and YouTube answers 403.
-        with yt_dlp.YoutubeDL({**options, "format": fmt["format_id"]}) as ydl:
+        download_options = {**options, "format": fmt["format_id"]}
+        if on_stage is not None:
+            expected = _estimated_bytes(fmt, info.get("duration"))
+
+            def hook(d: dict) -> None:
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or expected
+                if d.get("status") == "downloading" and total:
+                    on_stage("downloading", d.get("downloaded_bytes", 0) * 100 / total)
+
+            download_options["progress_hooks"] = [hook]
+        with yt_dlp.YoutubeDL(download_options) as ydl:
             ydl.download([url])
     except yt_dlp.utils.DownloadError as e:
         # Shown to the user on the match page, so it says what to do rather than echo yt-dlp.
@@ -210,6 +244,8 @@ def download_youtube_video(
         raise RuntimeError("Video YouTube vượt giới hạn dung lượng hoặc YouTube không trả về file cho link này.")
     logger.info("Downloaded %.2f MB from YouTube", source_path.stat().st_size / (1024 * 1024))
     if segment is not None:
+        if on_stage is not None:
+            on_stage("cutting", None)
         try:
             cut_video(source_path, local_path, *segment)
         finally:

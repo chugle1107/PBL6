@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import psycopg2
 
@@ -69,6 +70,52 @@ def update_analysis_status(
         logger.exception("Failed to update analysis %s status", analysis_id)
         return False
     return True
+
+
+class StageReporter:
+    """
+    Writes the worker's set-up step (downloading with a percent, cutting, loading) to ai_analyses, so the progress
+    bar moves before the first analysed second. Best effort: the database is remote, so download percents are sent
+    at most every MIN_INTERVAL seconds, and a failure (e.g. a database without the column yet) only stops reporting.
+    """
+
+    MIN_INTERVAL = 2.0
+
+    def __init__(self, analysis_id: int):
+        self.analysis_id = analysis_id
+        self._last: tuple[str, int | None] | None = None
+        self._last_at = 0.0
+        self._broken = False
+
+    def __call__(self, stage: str, percent: float | None = None) -> None:
+        if self._broken:
+            return
+        value = None if percent is None else max(0, min(100, int(percent)))
+        now = time.monotonic()
+        if self._last == (stage, value):
+            return
+        # A new stage is written at once; only percents within the same stage are throttled.
+        if self._last is not None and self._last[0] == stage and now - self._last_at < self.MIN_INTERVAL:
+            return
+        try:
+            connection = get_connection()
+            try:
+                with connection, connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE ai_analyses
+                        SET worker_stage = %s, worker_stage_percent = %s, updated_at = NOW()
+                        WHERE id = %s AND status = 'PROCESSING'
+                        """,
+                        (stage, value, self.analysis_id),
+                    )
+            finally:
+                connection.close()
+        except Exception as e:  # noqa: BLE001 - progress display only
+            logger.warning("Could not store worker stage %s for analysis %s: %s", stage, self.analysis_id, e)
+            self._broken = True
+            return
+        self._last, self._last_at = (stage, value), now
 
 
 def fetch_analysis_status(analysis_id: int) -> str | None:

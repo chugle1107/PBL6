@@ -7,7 +7,7 @@ export const parseClock = (text: string): number | null => {
   // full-width digits or colons; NFKC folds those, then marks and invisible characters go.
   const value = text
     .normalize('NFKC')
-    .replace(/[\p{M}​-‍⁠﻿]/gu, '')
+    .replace(/[\p{M}\u200B-\u200D\u2060\uFEFF]/gu, '')
     .replace(/\s+/g, '');
   if (!value) return null;
   if (/^\d+([.,]\d+)?$/.test(value)) return Math.round(parseFloat(value.replace(',', '.')) * 60);
@@ -18,6 +18,23 @@ export const parseClock = (text: string): number | null => {
   if (numbers.slice(1).some(n => n >= 60)) return NaN;
   return numbers.reduce((total, n) => total * 60 + n, 0);
 };
+
+/**
+ * Formats a time field as it is typed, so nobody has to type the colons: the digits fill
+ * from the right, "910" -> "9:10", "1410" -> "14:10", "10530" -> "1:05:30".
+ * One or two digits stay as they are, since "30" alone means minute 30 (see finishClockInput).
+ */
+export const formatClockInput = (text: string): string => {
+  const digits = text.normalize('NFKC').replace(/\D/g, '').replace(/^0+(?=\d{3})/, '').slice(0, 6);
+  if (digits.length <= 2) return digits;
+  const seconds = digits.slice(-2);
+  const rest = digits.slice(0, -2);
+  if (rest.length <= 2) return `${rest}:${seconds}`;
+  return `${rest.slice(0, -2)}:${rest.slice(-2)}:${seconds}`;
+};
+
+/** On leaving the field, a bare "30" becomes "30:00" so the minutes reading is visible. */
+export const finishClockInput = (text: string): string => (/^\d{1,2}$/.test(text) ? `${text}:00` : text);
 
 /** 95 -> "1:35", 3725 -> "1:02:05". */
 export const formatLongClock = (seconds: number): string => {
